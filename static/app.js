@@ -34,8 +34,8 @@ async function openSubmission(id){
   dialog.querySelector('.close').onclick=()=>dialog.close();
  }catch(error){document.querySelector('#detail-content').innerHTML=`<div class="modalhead"><h2>查看提交信息</h2><button class="close" aria-label="关闭">×</button></div><div class="modalbody"><div class="note warn">${esc(error.message)}</div></div>`;dialog.querySelector('.close').onclick=()=>dialog.close()}
 }
-async function openJob(id){taskLogState={id,open:false,paused:false,text:'',scroll:0};modelCallState={id,open:false,page:1,selected:null,cache:{}};clearInterval(detailPoll);dialog.showModal();document.querySelector('#detail-content').innerHTML='<div class="modalbody">正在读取任务…</div>';await refreshJob(id);detailPoll=setInterval(()=>{if(dialog.open)refreshJob(id);else clearInterval(detailPoll)},5000)}
-async function refreshJob(id){try{const task=await api('/v1/scans/'+id);if(!dialog.open)return;const report=task.report_ready?await api('/web/report/'+id):null;const active=['queued','running','cancel_requested'].includes(task.status);captureTaskLog();const opened=new Set([...dialog.querySelectorAll('details[data-finding][open]')].map(e=>e.dataset.finding));document.querySelector('#detail-content').innerHTML=`<div class="modalhead"><div><h2>${esc(task.name)}</h2><small>${esc(task.id)}</small></div><button class="close" aria-label="关闭">×</button></div><div class="modalbody"><div class="actions" style="margin-bottom:20px">${statusTag(task.status)}<span class="tag kind">${kindLabel(task.kind)}</span><span class="muted">${date(task.created)}</span></div>${active?'<div class="progress-track"><div></div></div><p class="muted">任务正在后台处理，关闭此窗口不会停止检测。</p>':''}${task.detail.verification?verificationResult(task.detail.verification):executionPanel(task)}${modelMetricsPanel(task.model_metrics)}${task.instructions?`<details class="note" style="margin:16px 0"><summary>本次测试要求</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(task.instructions)}</pre></details>`:''}${task.detail.reason?`<div class="note warn" style="margin-top:18px">${esc(task.detail.reason)}</div>`:''}<div class="actions" style="margin:20px 0">${task.report_ready?`<a class="primary" href="/v1/scans/${id}/report">下载 Markdown 报告</a><a class="secondary" href="/v1/scans/${id}/report?format=json">下载 JSON</a>`:''}${active?'<button class="danger" id="cancel-job">停止任务</button>':''}</div>${me.role==='admin'?modelCallPanel()+taskLogPanel():''}${task.kind==='greybox_verify'?'':findingList(task.findings||[],active)}${report?'<div class="note warn">'+(report.warnings||[]).map(esc).join('<br>')+'</div><h3 style="margin-top:25px">报告正文</h3><div class="report" id="report-body"></div>':(task.kind==='greybox_verify'?'<div class="note">此任务仅验证接口调用，不生成漏洞报告。</div>':'<div class="note">报告将在扫描结束后生成。</div>')}</div>`;dialog.querySelectorAll('details[data-finding]').forEach(e=>{e.open=opened.has(e.dataset.finding)});dialog.querySelector('.close').onclick=()=>{dialog.close();clearInterval(detailPoll)};if(report)renderReport(document.querySelector('#report-body'),report.raw_report||'本次没有生成原始报告，请查看上方运行说明。');const button=document.querySelector('#cancel-job');if(button)button.onclick=async()=>{if(!confirm('确认停止此任务？已经产生的模型费用不会退回。'))return;await api('/v1/scans/'+id+'/cancel',{method:'POST'});toast('已请求停止');refreshJob(id)};await updateTaskLog(id);await updateModelCalls(id);if(!active)clearInterval(detailPoll)}catch(error){toast(error.message)}}
+async function openJob(id){taskLogState={id,open:false,paused:false,text:'',scroll:0};modelCallState={id,page:1};clearInterval(detailPoll);dialog.showModal();document.querySelector('#detail-content').innerHTML='<div class="modalbody">正在读取任务…</div>';await refreshJob(id);detailPoll=setInterval(()=>{if(dialog.open)refreshJob(id);else clearInterval(detailPoll)},5000)}
+async function refreshJob(id){const state=modelCallState;try{const task=await api('/v1/scans/'+id);const report=task.report_ready?await api('/web/report/'+id):null;if(!dialog.open||state!==modelCallState)return;const active=['queued','running','cancel_requested'].includes(task.status);captureTaskLog();const callPanel=dialog.querySelector('#model-calls-panel');const opened=new Set([...dialog.querySelectorAll('details[data-finding][open]')].map(e=>e.dataset.finding));document.querySelector('#detail-content').innerHTML=`<div class="modalhead"><div><h2>${esc(task.name)}</h2><small>${esc(task.id)}</small></div><button class="close" aria-label="关闭">×</button></div><div class="modalbody"><div class="actions" style="margin-bottom:20px">${statusTag(task.status)}<span class="tag kind">${kindLabel(task.kind)}</span><span class="muted">${date(task.created)}</span></div>${active?'<div class="progress-track"><div></div></div><p class="muted">任务正在后台处理，关闭此窗口不会停止检测。</p>':''}${task.detail.verification?verificationResult(task.detail.verification):executionPanel(task)}${modelMetricsPanel(task.model_metrics)}${task.instructions?`<details class="note" style="margin:16px 0"><summary>本次测试要求</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(task.instructions)}</pre></details>`:''}${task.detail.reason?`<div class="note warn" style="margin-top:18px">${esc(task.detail.reason)}</div>`:''}<div class="actions" style="margin:20px 0">${task.report_ready?`<a class="primary" href="/v1/scans/${id}/report">下载 Markdown 报告</a><a class="secondary" href="/v1/scans/${id}/report?format=json">下载 JSON</a>`:''}${active?'<button class="danger" id="cancel-job">停止任务</button>':''}</div>${me.role==='admin'?modelCallPanel()+taskLogPanel():''}${task.kind==='greybox_verify'?'':findingList(task.findings||[],active)}${report?'<div class="note warn">'+(report.warnings||[]).map(esc).join('<br>')+'</div><h3 style="margin-top:25px">报告正文</h3><div class="report" id="report-body"></div>':(task.kind==='greybox_verify'?'<div class="note">此任务仅验证接口调用，不生成漏洞报告。</div>':'<div class="note">报告将在扫描结束后生成。</div>')}</div>`;if(callPanel)dialog.querySelector('#model-calls-panel')?.replaceWith(callPanel);dialog.querySelectorAll('details[data-finding]').forEach(e=>{e.open=opened.has(e.dataset.finding)});dialog.querySelector('.close').onclick=()=>{dialog.close();clearInterval(detailPoll)};if(report)renderReport(document.querySelector('#report-body'),report.raw_report||'本次没有生成原始报告，请查看上方运行说明。');const button=document.querySelector('#cancel-job');if(button)button.onclick=async()=>{if(!confirm('确认停止此任务？已经产生的模型费用不会退回。'))return;await api('/v1/scans/'+id+'/cancel',{method:'POST'});toast('已请求停止');refreshJob(id)};await updateTaskLog(id);await updateModelCalls(id);if(!active)clearInterval(detailPoll)}catch(error){toast(error.message)}}
 function scanTabs(){return `<div class="scan-tabs" role="tablist" aria-label="扫描方式">${[['whitebox','白盒代码扫描'],['blackbox','黑盒系统扫描'],['greybox','灰盒登录扫描']].map(([id,label])=>`<button type="button" role="tab" aria-selected="${mode===id}" class="scan-tab ${mode===id?'active':''}" data-mode="${id}">${label}</button>`).join('')}</div>`}
 function kindLabel(kind){return {whitebox:'白盒扫描',blackbox:'黑盒扫描',greybox:'灰盒扫描',greybox_verify:'灰盒接口验证'}[kind]||kind}
 function verificationResult(items){return '<h3>接口验证结果</h3>'+items.map(r=>`<div class="note ${r.state==='success'?'':'warn'}" style="margin:10px 0"><strong>${esc(r.label)} · ${esc({success:'调用成功',failed:'调用失败',unknown:'无法确认'}[r.state]||r.state)}</strong><p>${esc(r.message)}${r.http_status?' · HTTP '+esc(r.http_status):''}</p></div>`).join('')}
@@ -142,7 +142,6 @@ dialog.addEventListener('close',()=>clearInterval(detailPoll));
 
 let taskLogState={};
 function captureTaskLog(){
- const calls=document.querySelector('#model-calls-panel');if(calls)modelCallState.open=calls.open;
  const panel=document.querySelector('#task-log-panel');
  if(panel){taskLogState.open=panel.open;taskLogState.scroll=panel.querySelector('pre').scrollTop}
 }
@@ -178,35 +177,69 @@ function modelMetricsPanel(metrics){
 
 let modelCallState={};
 function modelCallPanel(){
- return `<details class="note" id="model-calls-panel" style="margin:20px 0" ${modelCallState.open?'open':''}><summary>模型调用明细（管理员）</summary><p class="muted">查看每次实际请求的 messages / input、工具定义、模型参数和返回文字。凭据已脱敏，图片数据省略。仅新版本执行的调用有记录。</p><div class="model-call-list">展开后读取调用记录。</div></details>`;
+ return `<details class="note" id="model-calls-panel" style="margin:20px 0"><summary>模型调用明细（管理员）</summary><p class="muted">查看每次实际请求的 messages / input、工具定义、模型参数和返回文字。凭据已脱敏，图片数据省略。仅新版本执行的调用有记录。</p><div class="model-call-list">展开后读取调用记录。</div></details>`;
 }
 function modelRecordText(value){return JSON.stringify(value,null,2)}
-async function updateModelCalls(id){
- const panel=document.querySelector('#model-calls-panel');if(!panel)return;
- panel.ontoggle=()=>{modelCallState.open=panel.open;if(panel.open)updateModelCalls(id)};
+async function loadModelCall(state, element){
+ const slot=element.querySelector('[data-call-content]');
+ if(element.dataset.finished||element.dataset.loading)return;
+ element.dataset.loading='true';
+ try{
+  const record=await api('/v1/scans/'+state.id+'/model-calls/'+element.dataset.call);
+  if(state!==modelCallState||!element.isConnected)return;
+  const version=JSON.stringify([record.finished,record.status,record.state]);
+  if(element.dataset.version===version)return;
+  const usage=record.response?.usage;
+  const scroll=[...slot.querySelectorAll('pre')].map(pre=>pre.scrollTop);
+  slot.innerHTML=`<p>${esc(record.url||'')}<br>输入 Token：${esc(usage?.prompt_tokens??usage?.input_tokens??'未知')}　输出 Token：${esc(usage?.completion_tokens??usage?.output_tokens??'未知')}</p>${record.notice?`<p class="note warn">${esc(record.notice)}</p>`:''}<h4>实际请求参数与输入文字</h4><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;user-select:text">${esc(modelRecordText(record.request??record.detail_preview??null))}</pre><h4>模型返回内容</h4><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;user-select:text">${esc(modelRecordText(record.response))}</pre>${record.error?`<p class="note warn">${esc(record.error)}</p>`:''}`;
+  slot.querySelectorAll('pre').forEach((pre,index)=>{pre.scrollTop=scroll[index]||0});
+  element.querySelector('[data-call-status]').textContent=record.status?'HTTP '+record.status:(record.finished?'已结束':'请求中');
+  element.dataset.version=version;
+  if(record.finished)element.dataset.finished='true';
+ }catch(error){
+  if(!element.dataset.version)slot.textContent=error.message;
+ }finally{
+  delete element.dataset.loading;
+ }
+}
+async function updateModelCalls(id,changePage=false){
+ const state=modelCallState;
+ const panel=dialog.querySelector('#model-calls-panel');
+ if(!panel||state.id!==id)return;
+ panel.ontoggle=()=>{if(panel.open)updateModelCalls(id)};
  if(!panel.open)return;
  const list=panel.querySelector('.model-call-list');
+ const expanded=()=>[...list.querySelectorAll('[data-call][open]')];
+ // Keep the visible page stable while reading. New calls can shift every page.
+ if(!changePage&&state.listRequest)return;
+ if(!changePage&&expanded().length){
+  await Promise.all(expanded().map(element=>loadModelCall(state,element)));
+  return;
+ }
+ const requestedPage=state.page;
+ const request=Symbol();
+ state.listRequest=request;
+ const current=()=>state===modelCallState&&state.listRequest===request&&panel.isConnected&&panel.open;
  try{
-  const value=await api('/v1/scans/'+id+'/model-calls?page='+modelCallState.page);
-  if(!panel.isConnected||modelCallState.id!==id)return;
-  list.innerHTML=value.items.map(call=>`<details class="note" data-call="${esc(call.id)}" style="margin:10px 0" ${modelCallState.selected===call.id?'open':''}><summary>${date(call.started)} · ${esc(call.model||'未标注模型')} · ${call.status?'HTTP '+esc(call.status):'请求中'}</summary><div data-call-content>正在读取…</div></details>`).join('')||'<p>暂无模型调用明细。旧任务无法补录当时的完整请求。</p>';
-  list.innerHTML+=`<div class="actions"><span>共 ${value.total} 次 · 第 ${value.page} 页</span><button class="secondary" id="calls-prev" ${value.page<=1?'disabled':''}>上一页</button><button class="secondary" id="calls-next" ${value.page*20>=value.total?'disabled':''}>下一页</button></div>`;
-  list.querySelector('#calls-prev').onclick=()=>{modelCallState.page--;updateModelCalls(id)};
-  list.querySelector('#calls-next').onclick=()=>{modelCallState.page++;updateModelCalls(id)};
-  const load=async(element,call)=>{
-   const slot=element.querySelector('[data-call-content]');
-   try{
-    let record=modelCallState.cache[call.id];
-    if(!record||record.finished!==call.finished){record=await api('/v1/scans/'+id+'/model-calls/'+call.id);modelCallState.cache[call.id]=record}
-    if(!element.isConnected)return;
-    const usage=record.response?.usage;
-    slot.innerHTML=`<p>${esc(record.url||'')}<br>输入 Token：${esc(usage?.prompt_tokens??usage?.input_tokens??'未知')}　输出 Token：${esc(usage?.completion_tokens??usage?.output_tokens??'未知')}</p>${record.notice?`<p class="note warn">${esc(record.notice)}</p>`:''}<h4>实际请求参数与输入文字</h4><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;user-select:text">${esc(modelRecordText(record.request??record.detail_preview??null))}</pre><h4>模型返回内容</h4><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;user-select:text">${esc(modelRecordText(record.response))}</pre>${record.error?`<p class="note warn">${esc(record.error)}</p>`:''}`;
-   }catch(error){slot.textContent=error.message}
-  };
+  const value=await api('/v1/scans/'+id+'/model-calls?page='+requestedPage);
+  if(!current()||(!changePage&&expanded().length))return;
+  list.innerHTML=value.items.map(call=>`<details class="note" data-call="${esc(call.id)}" style="margin:10px 0"><summary>${date(call.started)} · ${esc(call.model||'未标注模型')} · <span data-call-status>${call.status?'HTTP '+esc(call.status):(call.finished?'已结束':'请求中')}</span></summary><div data-call-content>正在读取…</div></details>`).join('')||'<p>暂无模型调用明细。旧任务无法补录当时的完整请求。</p>';
+  list.insertAdjacentHTML('beforeend',`<div class="actions"><span>共 ${value.total} 次 · 第 ${value.page} 页</span><button class="secondary" id="calls-prev" ${value.page<=1?'disabled':''}>上一页</button><button class="secondary" id="calls-next" ${value.page*20>=value.total?'disabled':''}>下一页</button></div><small class="muted" data-call-error></small>`);
+  const goToPage=page=>{state.page=page;updateModelCalls(id,true)};
+  list.querySelector('#calls-prev').onclick=()=>goToPage(value.page-1);
+  list.querySelector('#calls-next').onclick=()=>goToPage(value.page+1);
   for(const element of list.querySelectorAll('[data-call]')){
-   const call=value.items.find(item=>item.id===element.dataset.call);
-   element.ontoggle=()=>{if(element.open){modelCallState.selected=call.id;load(element,call)}else if(modelCallState.selected===call.id)modelCallState.selected=null};
-   if(element.open)await load(element,call);
+   element.ontoggle=()=>{
+    if(element.open)loadModelCall(state,element);
+    else if(!expanded().length)updateModelCalls(id);
+   };
   }
- }catch(error){if(panel.isConnected)list.textContent=error.message}
+ }catch(error){
+  if(!current())return;
+  const hint=list.querySelector('[data-call-error]');
+  if(hint)hint.textContent=error.message;
+  else list.textContent=error.message;
+ }finally{
+  if(state.listRequest===request)delete state.listRequest;
+ }
 }
