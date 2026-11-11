@@ -1,0 +1,70 @@
+services:
+  api:
+    image: strix-service:0.1.0
+    build: .
+    command: api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      STRIX_DATA_DIR: ${STRIX_DATA_DIR:?Set an absolute Linux data directory}
+      SERVICE_TOKENS_FILE: /run/secrets/service_tokens
+      ENABLE_SCANS: ${ENABLE_SCANS:-false}
+      ALLOWED_TARGET_HOSTS: ${ALLOWED_TARGET_HOSTS:-}
+      ALLOWED_TARGET_CIDRS: ${ALLOWED_TARGET_CIDRS:-}
+      ALLOWED_TARGET_PORTS: ${ALLOWED_TARGET_PORTS:-80,443}
+    volumes:
+      - type: bind
+        source: ${STRIX_DATA_DIR}
+        target: ${STRIX_DATA_DIR}
+    secrets:
+      - service_tokens
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      options: {max-size: 10m, max-file: '3'}
+  worker:
+    image: strix-service:0.1.0
+    command: worker
+    restart: unless-stopped
+    # Linux Docker Engine deployment: Strix's loopback Caido port belongs to the host.
+    network_mode: host
+    stop_grace_period: 45s
+    environment:
+      STRIX_DATA_DIR: ${STRIX_DATA_DIR}
+      ENABLE_SCANS: ${ENABLE_SCANS:-false}
+      EGRESS_POLICY_ACK: ${EGRESS_POLICY_ACK:-false}
+      ALLOWED_TARGET_HOSTS: ${ALLOWED_TARGET_HOSTS:-}
+      ALLOWED_TARGET_CIDRS: ${ALLOWED_TARGET_CIDRS:-}
+      ALLOWED_TARGET_PORTS: ${ALLOWED_TARGET_PORTS:-80,443}
+      STRIX_LLM: ${STRIX_LLM:-openai/deepseek-ai/DeepSeek-V3.2}
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.siliconflow.cn/v1}
+      LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}
+      LLM_API_KEY_FILE: /run/secrets/llm_key
+      STRIX_IMAGE: ghcr.io/usestrix/strix-sandbox:1.3.0@sha256:f6906c3114e504fd1a218fcf028d7a0e46851118403a438b63956de6ea7c4331
+      SCAN_TIMEOUT_SECONDS: ${SCAN_TIMEOUT_SECONDS:-1800}
+      SCAN_MAX_TURNS: ${SCAN_MAX_TURNS:-40}
+      SCAN_MAX_BUDGET_USD: ${SCAN_MAX_BUDGET_USD:-1}
+    volumes:
+      - type: bind
+        source: ${STRIX_DATA_DIR}
+        target: ${STRIX_DATA_DIR}
+      - /var/run/docker.sock:/var/run/docker.sock
+    secrets:
+      - llm_key
+    mem_limit: 2g
+    cpus: 2
+    logging:
+      options: {max-size: 10m, max-file: '3'}
+secrets:
+  service_tokens:
+    file: ./secrets/service-tokens.json
+  llm_key:
+    file: ./secrets/llm-key.txt

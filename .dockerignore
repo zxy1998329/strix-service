@@ -1,0 +1,6 @@
+.env
+.local.env
+secrets
+__pycache__
+*.tar
+.git

@@ -1,0 +1,4 @@
+FROM strix-service:0.2.1
+RUN pip install --no-cache-dir httpx==0.28.1
+COPY tests /app/tests
+RUN python -m unittest discover -s tests -v

@@ -1,0 +1,115 @@
+{
+  "info": {
+    "name": "Strix 黑盒与白盒检测 API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{api_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8080"
+    },
+    {
+      "key": "api_token",
+      "value": ""
+    },
+    {
+      "key": "job_id",
+      "value": ""
+    },
+    {
+      "key": "target",
+      "value": "http://172.30.88.10:8765/"
+    }
+  ],
+  "item": [
+    {
+      "name": "黑盒扫描",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{base_url}}/v1/scans/blackbox",
+        "description": "提交已授权的系统根地址，异步创建黑盒扫描任务。只允许管理员登记的目标。",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"黑盒接口测试\",\n  \"target\": \"{{target}}\",\n  \"authorized\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "白盒扫描",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{base_url}}/v1/scans/whitebox",
+        "description": "上传项目 ZIP，校验通过后异步创建白盒任务。导入 Postman 后，需重新在 Body → form-data 选择本地文件。",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "name",
+              "value": "白盒接口测试",
+              "type": "text"
+            },
+            {
+              "key": "authorized",
+              "value": "true",
+              "type": "text"
+            },
+            {
+              "key": "project",
+              "type": "file",
+              "src": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "查询任务进度",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/v1/scans/{{job_id}}",
+        "description": "按任务 ID 查询进度、状态与报告是否就绪。普通工号只能读取自己的任务，管理员可读取全部。"
+      }
+    },
+    {
+      "name": "下载测试报告",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/v1/scans/{{job_id}}/report?format=json",
+        "description": "默认下载 Markdown。format=json 返回报告 JSON。失败或超时也可能生成不完整报告；排队取消的任务不生成报告。"
+      }
+    },
+    {
+      "name": "取消检测任务",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{base_url}}/v1/scans/{{job_id}}/cancel",
+        "description": "取消排队任务或请求停止执行中的任务。HTTP 202 只表示接受请求，需要继续查询最终状态。"
+      }
+    }
+  ]
+}

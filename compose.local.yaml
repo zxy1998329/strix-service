@@ -1,0 +1,91 @@
+name: strix-local
+services:
+  api:
+    image: strix-service:0.2.1
+    command: api
+    restart: unless-stopped
+    ports: ['127.0.0.1:8080:8080']
+    environment:
+      STRIX_DATA_DIR: ${STRIX_DATA_DIR:?Required}
+      SERVICE_TOKENS_FILE: /run/secrets/service_tokens
+      ENABLE_SCANS: ${ENABLE_SCANS:-false}
+      WEB_CONFIG_REQUIRED: 'true'
+      EGRESS_POLICY_ACK: 'true'
+      ALLOWED_TARGET_HOSTS: 172.30.88.10
+      ALLOWED_TARGET_CIDRS: 172.30.88.10/32
+      ALLOWED_TARGET_PORTS: '8765'
+    volumes:
+      - type: volume
+        source: data
+        target: ${STRIX_DATA_DIR}
+    secrets: [service_tokens]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    logging:
+      options: {max-size: 10m, max-file: '3'}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+  worker:
+    image: strix-service:0.2.1
+    command: worker
+    restart: unless-stopped
+    network_mode: host
+    stop_grace_period: 45s
+    environment:
+      STRIX_DATA_DIR: ${STRIX_DATA_DIR}
+      ENABLE_SCANS: ${ENABLE_SCANS:-false}
+      WEB_CONFIG_REQUIRED: 'true'
+      # Local sandbox network is Docker-internal and contains only this synthetic fixture.
+      EGRESS_POLICY_ACK: 'true'
+      STRIX_DOCKER_SANDBOX_NETWORK: strix-local-sandbox
+      ALLOWED_TARGET_HOSTS: 172.30.88.10
+      ALLOWED_TARGET_CIDRS: 172.30.88.10/32
+      ALLOWED_TARGET_PORTS: '8765'
+      STRIX_LLM: openai/deepseek-ai/DeepSeek-V3.2
+      LLM_API_BASE: https://api.siliconflow.cn/v1
+      LLM_EXTRA_BODY: '{"enable_thinking":false}'
+      LLM_API_KEY_FILE: /run/secrets/llm_key
+      STRIX_IMAGE: ghcr.io/usestrix/strix-sandbox:1.3.0@sha256:f6906c3114e504fd1a218fcf028d7a0e46851118403a438b63956de6ea7c4331
+      SCAN_TIMEOUT_SECONDS: '1800'
+      SCAN_MAX_TURNS: '40'
+      SCAN_MAX_BUDGET_USD: '0.50'
+    volumes:
+      - type: volume
+        source: data
+        target: ${STRIX_DATA_DIR}
+      - /var/run/docker.sock:/var/run/docker.sock
+    secrets: [llm_key]
+    mem_limit: 2g
+    logging:
+      options: {max-size: 10m, max-file: '3'}
+  demo:
+    image: strix-service:0.1.0
+    command: [python, /fixture/serve.py]
+    restart: unless-stopped
+    volumes:
+      - ./local-demo:/fixture:ro
+    networks:
+      sandbox:
+        ipv4_address: 172.30.88.10
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    logging:
+      options: {max-size: 5m, max-file: '2'}
+volumes:
+  data:
+    external: true
+    name: strix-local-data
+networks:
+  sandbox:
+    external: true
+    name: strix-local-sandbox
+secrets:
+  service_tokens:
+    file: ./secrets/service-tokens.json
+  llm_key:
+    file: ./secrets/llm-key.txt

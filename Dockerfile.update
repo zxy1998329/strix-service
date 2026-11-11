@@ -1,0 +1,9 @@
+FROM strix-engine-runtime:20261110
+ENV STRIX_DOCKER_SANDBOX_NETWORK=bridge
+COPY engine/strix/interface/scan_setup.py /opt/strix-engine/strix/interface/scan_setup.py
+RUN cd /opt/strix-engine && uv sync --frozen --no-dev --python /usr/local/bin/python3
+COPY task_submission.py task_reuse.py greybox.py service.py worker.py portal.py runtime_config.py launcher.py entrypoint.sh model_calls.py call_details.py engine_bootstrap.py /app/
+COPY static /app/static
+COPY strix-launcher.sh /usr/local/bin/strix
+RUN rm -f /app/model_gateway.py /app/model_input.py && chmod 755 /usr/local/bin/strix
+RUN /usr/local/bin/strix --version && /usr/local/bin/strix --help > /tmp/strix-help && grep -q 'max-turns' /tmp/strix-help

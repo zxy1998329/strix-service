@@ -1,0 +1,6 @@
+FROM strix-service:gateway-20261109
+RUN pip install --no-cache-dir uv==0.13.7
+COPY engine /opt/strix-engine
+ENV LITELLM_LOCAL_MODEL_COST_MAP=True TIKTOKEN_CACHE_DIR=/opt/tokenizer-cache UV_PYTHON_DOWNLOADS=never
+RUN cd /opt/strix-engine && uv sync --frozen --no-dev --no-install-project --python /usr/local/bin/python3
+RUN mkdir -p /opt/tokenizer-cache && /opt/strix-engine/.venv/bin/python -c "import tiktoken; tiktoken.get_encoding('cl100k_base'); tiktoken.get_encoding('o200k_base')"
