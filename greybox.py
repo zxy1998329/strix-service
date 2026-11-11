@@ -67,16 +67,16 @@ def load(root):
     return json.loads(runtime_config.cipher().decrypt(path.read_bytes())) if path.is_file() else {}
 
 
-def redact(value, auth):
+def redact(value, auth, *, truncate=True):
     from portal import probe_error_detail
     secrets = [a.get(k,'') for a in auth.get('accounts',[]) for k in ('username','password','cookie','token') if a.get(k)]
     secrets += [entry['value'] for a in auth.get('accounts',[]) for entry in a.get('auth',[]) if entry.get('value')]
     if isinstance(value, dict):
-        return {k: redact(v,auth) for k,v in value.items()}
+        return {k: redact(v, auth, truncate=truncate) for k,v in value.items()}
     if isinstance(value, list):
-        return [redact(v,auth) for v in value]
+        return [redact(v, auth, truncate=truncate) for v in value]
     if isinstance(value,str):
-        return probe_error_detail(value,{'extra_headers':{str(i):v for i,v in enumerate(secrets)}})
+        return probe_error_detail(value, {'extra_headers': {str(i):v for i,v in enumerate(secrets)}}, truncate=truncate)
     return value
 
 

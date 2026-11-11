@@ -146,7 +146,7 @@ function captureTaskLog(){
  if(panel){taskLogState.open=panel.open;taskLogState.scroll=panel.querySelector('pre').scrollTop}
 }
 function taskLogPanel(){
- return `<details id="task-log-panel" class="note" style="margin:20px 0" ${taskLogState.open?'open':''}><summary>运行日志（管理员）</summary><div class="actions" style="margin:12px 0"><button type="button" id="log-pause" class="secondary">${taskLogState.paused?'恢复刷新':'暂停刷新'}</button><button type="button" id="log-refresh" class="secondary">刷新</button><button type="button" id="log-copy" class="secondary">复制日志</button></div><small id="log-hint">显示最近约 16 KB，展开后每 5 秒刷新，凭据已过滤。</small><pre style="max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text"></pre></details>`;
+ return `<details id="task-log-panel" class="note" style="margin:20px 0" ${taskLogState.open?'open':''}><summary>运行日志（管理员）</summary><div class="actions" style="margin:12px 0"><button type="button" id="log-pause" class="secondary">${taskLogState.paused?'恢复刷新':'暂停刷新'}</button><button type="button" id="log-refresh" class="secondary">刷新</button><button type="button" id="log-copy" class="secondary">复制日志</button><button type="button" id="log-download" class="secondary">下载完整日志</button></div><small id="log-hint">显示最近约 16 KB，展开后每 5 秒刷新，凭据已过滤。</small><pre style="max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text"></pre></details>`;
 }
 async function updateTaskLog(id,force=false){
  const panel=document.querySelector('#task-log-panel');if(!panel)return;
@@ -155,6 +155,21 @@ async function updateTaskLog(id,force=false){
  panel.querySelector('#log-pause').onclick=()=>{taskLogState.paused=!taskLogState.paused;panel.querySelector('#log-pause').textContent=taskLogState.paused?'恢复刷新':'暂停刷新';if(!taskLogState.paused)updateTaskLog(id,true)};
  panel.querySelector('#log-refresh').onclick=()=>updateTaskLog(id,true);
  panel.querySelector('#log-copy').onclick=async()=>{try{await navigator.clipboard.writeText(taskLogState.text||'');toast('日志已复制')}catch{toast('请选中日志文字手动复制')}};
+ panel.querySelector('#log-download').onclick=async()=>{
+  try{
+   const response=await fetch('/v1/scans/'+id+'/logs?download=true');
+   if(!response.ok){
+    const error=await response.json().catch(()=>({}));
+    throw Error(error.detail||'日志下载失败');
+   }
+   const url=URL.createObjectURL(await response.blob());
+   const link=document.createElement('a');
+   link.href=url;
+   link.download='worker-'+id+'.log';
+   link.click();
+   setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }catch(error){toast(error.message)}
+ };
  if(!panel.open||(!force&&taskLogState.paused))return;
  try{
   const value=await api('/v1/scans/'+id+'/logs');

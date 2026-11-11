@@ -33,7 +33,9 @@ class PortalTests(unittest.TestCase):
         path = service.job_dir(job_id) / 'worker.log'
         endpoint = '/v1/scans/' + job_id + '/logs'
         self.assertEqual(self.client.get(endpoint).status_code, 200)
-        path.write_text('x' * 20000 + '\nAuthorization: Bearer synthetic-log-secret\nCookie: session=private\n\x1b[31mHTTP 429\x1b[0m', encoding='utf-8')
+        download = endpoint + '?download=true'
+        self.assertEqual(self.client.get(download).status_code, 404)
+        path.write_text('start synthetic-log-secret\n' + 'x' * 20000 + '\nAuthorization: Bearer synthetic-log-secret\nCookie: session=private\n\x1b[31mHTTP 429\x1b[0m', encoding='utf-8')
         response = self.client.get(endpoint)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()['truncated'])
@@ -42,16 +44,31 @@ class PortalTests(unittest.TestCase):
         self.assertNotIn('session=private', response.text)
         self.assertNotIn('\x1b', response.json()['text'])
         self.assertEqual(response.headers['cache-control'], 'no-store')
+        self.assertNotIn('start', response.json()['text'])
+        response = self.client.get(download)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['content-disposition'], f'attachment; filename="worker-{job_id}.log"')
+        self.assertEqual(response.headers['cache-control'], 'no-store')
+        self.assertTrue(response.text.startswith('start [已脱敏]'))
+        self.assertIn('x' * 20000, response.text)
+        self.assertTrue(response.text.endswith('HTTP 429'))
+        self.assertNotIn('synthetic-log-secret', response.text)
+        self.assertNotIn('session=private', response.text)
+        self.assertNotIn('\x1b', response.text)
         path.unlink()
         path.symlink_to(service.job_dir(job_id) / 'requirements.json')
         self.assertEqual(self.client.get(endpoint).status_code, 400)
+        self.assertEqual(self.client.get(download).status_code, 400)
         path.unlink()
         with service.database() as conn:
             conn.execute('DELETE FROM portal_settings')
         self.login(role='user', employee='001234')
         employee_job = self.client.post('/v1/scans/whitebox', headers={'Authorization': 'Bearer ' + 'a' * 40},
             data={'authorized': 'true'}, files={'project': ('demo.zip', self.zip_bytes())})
-        self.assertEqual(self.client.get('/v1/scans/' + employee_job.json()['id'] + '/logs', headers={'Authorization': 'Bearer ' + 'a' * 40}).status_code, 403)
+        employee_endpoint = '/v1/scans/' + employee_job.json()['id'] + '/logs'
+        employee_headers = {'Authorization': 'Bearer ' + 'a' * 40}
+        self.assertEqual(self.client.get(employee_endpoint, headers=employee_headers).status_code, 403)
+        self.assertEqual(self.client.get(employee_endpoint + '?download=true', headers=employee_headers).status_code, 403)
 
     def test_scope_form_updates_allowlist_without_changing_model_or_secrets(self):
         import socket

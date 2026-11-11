@@ -398,7 +398,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def probe_error_detail(text, config):
+def probe_error_detail(text, config, *, truncate=True):
     """Keep useful upstream diagnostics while removing configured credentials."""
     text = str(text)
     secrets_to_hide = [config.get('api_key', '')]
@@ -408,7 +408,9 @@ def probe_error_detail(text, config):
         text = text.replace(secret, '[已脱敏]')
     text = re.sub(r'(?i)(Bearer\s+)[^\s"\'<>]+', r'\1[已脱敏]', text)
     text = re.sub(r'(?i)(["\']?(?:api[_-]?key|access[_-]?token|authorization|password|secret)["\']?\s*[:=]\s*)("[^"\n]*"|\'[^\'\n]*\'|[^\s,;}]+)', r'\1"[已脱敏]"', text)
-    return text[:16000] + ('\n[内容过长，已截断]' if len(text) > 16000 else '')
+    if truncate and len(text) > 16000:
+        return text[:16000] + '\n[内容过长，已截断]'
+    return text
 
 
 def _probe_model_basic(config, question=''):

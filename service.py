@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from starlette.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -509,8 +509,7 @@ def model_call_detail(job_id: str, call_id: str, owner: str = Depends(authentica
 
 
 @app.get('/v1/scans/{job_id}/logs')
-def task_logs(job_id: str, owner: str = Depends(authenticate)):
-    import re
+def task_logs(job_id: str, download: bool = False, owner: str = Depends(authenticate)):
     import portal
     import runtime_config
     owned_job(job_id, owner)
@@ -520,25 +519,32 @@ def task_logs(job_id: str, owner: str = Depends(authenticate)):
     path = root / 'worker.log'
     if path.is_symlink():
         raise HTTPException(400, '日志不可读取')
+    headers = {'Cache-Control': 'no-store'}
     if not path.exists():
-        return JSONResponse({'text': '尚未产生运行日志。', 'truncated': False}, headers={'Cache-Control': 'no-store'})
-    if path.is_symlink() or not path.is_file():
+        if download:
+            raise HTTPException(404, '尚未产生运行日志。', headers=headers)
+        return JSONResponse({'text': '尚未产生运行日志。', 'truncated': False}, headers=headers)
+    if not path.is_file():
         raise HTTPException(400, '日志不可读取')
     with path.open('rb') as stream:
         stream.seek(0, 2)
         size = stream.tell()
-        stream.seek(max(0, size - 16000))
-        text = stream.read(16000).decode('utf-8', errors='replace')
+        start = 0 if download else max(0, size - 16000)
+        stream.seek(start)
+        text = stream.read(size - start).decode('utf-8', errors='replace')
     text = re.sub(r'\x1b\][^\x07]*(?:\x07|\x1b\\)', '', text)
     text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
     for config in (runtime_config.for_job(root), runtime_config.get_settings()):
         if config:
-            text = portal.probe_error_detail(text, config)
+            text = portal.probe_error_detail(text, config, truncate=not download)
     if (root / 'auth.enc').exists():
         import greybox
-        text = greybox.redact(text, greybox.load(root))
+        text = greybox.redact(text, greybox.load(root), truncate=not download)
     text = re.sub(r'(?im)((?:set-cookie|cookie)\s*:\s*)[^\r\n]+', r'\1[已脱敏]', text)
-    return JSONResponse({'text': text, 'truncated': size > 16000}, headers={'Cache-Control': 'no-store'})
+    if download:
+        headers['Content-Disposition'] = f'attachment; filename="worker-{job_id}.log"'
+        return PlainTextResponse(text, headers=headers)
+    return JSONResponse({'text': text, 'truncated': start > 0}, headers=headers)
 
 
 @app.get('/v1/scans/{job_id}/report')
