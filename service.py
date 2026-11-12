@@ -131,7 +131,8 @@ def enqueue(job_id, owner, kind, name, target, instructions=''):
                      (job_id, owner, kind, name, target, 'queued', now, now))
         if config:
             conn.execute('UPDATE jobs SET detail=? WHERE id=?',
-                         (json.dumps({'config_revision': config['revision'], 'model': config['model']}), job_id))
+                         (json.dumps({'config_revision': config['revision'], 'model': config['model'],
+                                      'backup_model': config.get('backup_model', '') if config.get('backup_enabled') else ''}), job_id))
 
 
 def safe_extract(archive, destination):
@@ -451,6 +452,7 @@ def status(job_id: str, owner: str = Depends(authenticate)):
             row['findings'] = [item for item in saved['findings'] if isinstance(item, dict)]
     row['findings_count'] = len(row['findings'])
     row['execution'] = execution_progress(run, row)
+    row['model_route'] = read_json(job_dir(job_id) / 'model_route.json', {})
     row['model_metrics'] = model_metrics(job_dir(job_id), run)
     row['report_url'] = f'/v1/scans/{job_id}/report' if row['report_ready'] else None
     if row['kind'].startswith('greybox'):
@@ -479,7 +481,9 @@ def safe_model_record(job_id, path):
     for config in (runtime_config.for_job(job_dir(job_id)), runtime_config.get_settings()):
         if config:
             secrets += [config.get('api_key', '')]
+            secrets += [config.get('backup_api_key', '')]
             secrets += list(config.get('extra_headers', {}).values())
+            secrets += list(config.get('backup_extra_headers', {}).values())
             secrets += list(config.get('provider_env', {}).values())
     return sanitize(value, [secret for secret in secrets if isinstance(secret,str) and secret])
 

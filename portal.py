@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+import model_failover
 import runtime_config
 import service
 
@@ -313,11 +314,41 @@ def install(app):
             raise HTTPException(400, '配置必须是对象')
         resolve_form_key(payload)
         try:
-            runtime_config.save_settings(payload)
+            saved = runtime_config.save_settings(payload)
         except (ValueError, TypeError, KeyError) as error:
             raise HTTPException(400, str(error))
+        try:
+            model_failover.reset_state(service.DATA, saved.get('revision', ''))
+        except OSError:
+            pass
         audit('__admin__', 'configuration_updated')
         return runtime_config.public_settings()
+
+    @app.get('/web/admin/model-health')
+    def model_health(request: Request):
+        require_session(request, True)
+        settings = runtime_config.get_settings() or runtime_config.defaults()
+        revision = settings.get('revision', '')
+        try:
+            targets = runtime_config.model_targets(settings)
+        except ValueError:
+            targets = None
+        backup = targets.get('backup') if targets else None
+        state = model_failover.read_state(service.DATA, revision) if backup else model_failover.default_state(revision)
+        if not backup:
+            state['active'] = 'primary'
+        active = state.get('active') if state.get('active') in ('primary', 'backup') else 'primary'
+        target = (targets.get(active) if targets else None) or (targets.get('primary') if targets else None)
+        return {'revision': revision, 'active': active,
+                'active_role': '主模型' if active == 'primary' else '备用模型',
+                'active_model': (target or {}).get('model_name', ''),
+                'primary_model': ((targets or {}).get('primary') or {}).get('model_name', ''),
+                'backup_enabled': bool(backup), 'backup_model': (backup or {}).get('model_name', ''),
+                'changed_at': state.get('changed_at'), 'opened_at': state.get('opened_at'),
+                'next_probe_at': state.get('next_probe_at'), 'last_probe_at': state.get('last_probe_at'),
+                'last_probe_ok': state.get('last_probe_ok'), 'last_probe_error': state.get('last_probe_error'),
+                'last_error': state.get('last_error'), 'switches': state.get('switches', 0),
+                'server_time': time.time(), 'network_ready': os.environ.get('EGRESS_POLICY_ACK', '').lower() == 'true'}
 
     @app.post('/web/admin/test-model')
     async def test_model(request: Request):
@@ -326,22 +357,44 @@ def install(app):
         if not isinstance(payload, dict):
             raise HTTPException(400, '测试参数必须是对象')
         resolve_form_key(payload)
+        role = payload.get('role', 'primary')
+        if role not in ('primary', 'backup'):
+            raise HTTPException(400, '测试角色不正确')
         config = dict(runtime_config.get_settings() or runtime_config.defaults())
-        for key in ('api_type', 'api_base', 'model', 'api_key'):
-            if key not in payload or not isinstance(payload[key], str):
-                raise HTTPException(400, '请提交当前页面的接口格式、地址、模型和 Key')
-            config[key] = payload[key].strip()
+        if role == 'backup':
+            if not isinstance(payload.get('backup_api_type'), str) or not isinstance(payload.get('backup_api_base'), str) \
+                    or not isinstance(payload.get('backup_model'), str) or not isinstance(payload.get('backup_api_key'), str):
+                raise HTTPException(400, '请提交备用模型的接口格式、地址、模型和 Key')
+            config['api_type'] = payload['backup_api_type'].strip()
+            config['api_base'] = payload['backup_api_base'].strip()
+            config['model'] = payload['backup_model'].strip()
+            config['api_key'] = payload['backup_api_key'].strip()
+            config['extra_headers'] = config.get('backup_extra_headers') or {}
+            config['extra_body'] = config.get('backup_extra_body') or {}
+            try:
+                runtime_config.validate_model_connection(
+                    {'api_type': config['api_type'], 'api_base': config['api_base'],
+                     'extra_headers': config['extra_headers'], 'extra_body': config['extra_body']}, '备用模型')
+            except (ValueError, TypeError) as error:
+                raise HTTPException(400, str(error))
+        else:
+            for key in ('api_type', 'api_base', 'model', 'api_key'):
+                if key not in payload or not isinstance(payload[key], str):
+                    raise HTTPException(400, '请提交当前页面的接口格式、地址、模型和 Key')
+                config[key] = payload[key].strip()
         # Test connection only: do not enable scans or persist this configuration.
         config['enabled'] = False
-        try:
-            runtime_config.validate_settings(config)
-        except (ValueError, TypeError, KeyError) as error:
-            raise HTTPException(400, str(error))
+        if role == 'primary':
+            try:
+                runtime_config.validate_settings(config)
+            except (ValueError, TypeError, KeyError) as error:
+                raise HTTPException(400, str(error))
         question = payload.get('question', '')
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
             raise HTTPException(400, '请填写测试问题，最多 4000 个字符')
         result = await run_in_threadpool(probe_model, config, question.strip())
-        audit('__admin__', 'model_probe', 'success' if result['ok'] else 'failed')
+        result['role'] = role
+        audit('__admin__', 'model_probe', role + ':' + ('success' if result['ok'] else 'failed'))
         return result
 
     @app.get('/web/admin/users')
@@ -384,13 +437,21 @@ def install(app):
 
 
 def resolve_form_key(payload):
-    if payload.get('api_key_reference'):
+    saved = None
+    if payload.get('api_key_reference') or payload.get('backup_api_key_reference'):
         saved = runtime_config.get_settings() or {}
+    if payload.get('api_key_reference'):
         if payload['api_key_reference'] != saved.get('revision'):
-            raise HTTPException(409, '已保存的 Key 已变化，请刷新页面后重试')
+            raise HTTPException(409, '已保存的主模型 Key 已变化，请刷新页面后重试')
         payload['api_key'] = saved.get('api_key', '')
     elif 'api_key' in payload and payload['api_key'] == '':
         payload['clear_api_key'] = True
+    if payload.get('backup_api_key_reference'):
+        if payload['backup_api_key_reference'] != saved.get('revision'):
+            raise HTTPException(409, '已保存的备用模型 Key 已变化，请刷新页面后重试')
+        payload['backup_api_key'] = saved.get('backup_api_key', '')
+    elif 'backup_api_key' in payload and payload['backup_api_key'] == '':
+        payload['clear_backup_api_key'] = True
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

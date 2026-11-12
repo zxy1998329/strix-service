@@ -4,10 +4,12 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 import docker
+import model_failover
 import runtime_config
 
 from service import DATA, database, job_dir, latest_run, read_json, update_job, validate_target
@@ -108,6 +110,17 @@ def child_environment(secret_dir, settings=None):
             env[name] = os.environ[name]
     if settings is not None:
         env.update(runtime_config.model_environment(settings))
+        try:
+            targets = runtime_config.model_targets(settings)
+        except ValueError:
+            targets = None
+        if targets and targets.get('backup'):
+            failover_file = Path(secret_dir) / 'model-failover.json'
+            failover_file.write_text(json.dumps({'revision': targets['revision'], 'state_dir': str(DATA),
+                                                 'primary': targets['primary'], 'backup': targets['backup']}),
+                                     encoding='utf-8')
+            failover_file.chmod(0o600)
+            env['STRIX_MODEL_FAILOVER_FILE'] = str(failover_file)
         return env
     for name in ('STRIX_LLM', 'STRIX_API_TYPE', 'LLM_API_BASE', 'LLM_EXTRA_BODY'):
         if os.environ.get(name):
@@ -166,6 +179,9 @@ def run_job(job):
             if settings:
                 redactions += list(settings.get('extra_headers', {}).values())
                 redactions += list(settings.get('provider_env', {}).values())
+                redactions += [settings.get('backup_api_key', '')]
+                redactions += list(settings.get('backup_extra_headers', {}).values())
+                redactions += list(settings.get('backup_extra_body', {}).values())
             if job['kind'] == 'greybox':
                 import greybox
                 for account in greybox.load(root).get('accounts', []):
@@ -230,6 +246,31 @@ def run_job(job):
         update_job(job['id'], terminal, detail)
 
 
+def probe_loop():
+    """Probe the primary model in the background; never blocks a scan."""
+    while not STOP:
+        try:
+            settings = runtime_config.get_settings()
+            if settings:
+                targets = runtime_config.model_targets(settings)
+                revision = settings.get('revision', '')
+                if not targets or not targets.get('backup'):
+                    state = model_failover.read_state(DATA, revision)
+                    if state.get('active') != 'primary':
+                        model_failover.reset_state(DATA, revision)
+                else:
+                    raw = model_failover.raw_state(DATA)
+                    if raw is None or raw.get('revision') != revision:
+                        model_failover.reset_state(DATA, revision)
+                    elif (raw.get('active') == 'backup' and raw.get('next_probe_at')
+                          and raw['next_probe_at'] <= time.time()):
+                        ok, error = model_failover.probe_primary(settings)
+                        model_failover.mark_probe_result(DATA, revision, ok, error)
+        except Exception as error:  # noqa: BLE001 - a health probe must not stop the worker
+            print(f'[模型探测] 后台探测失败（{type(error).__name__}）。', flush=True)
+        time.sleep(1)
+
+
 def main():
     os.umask(0o077)
     DATA.mkdir(parents=True, exist_ok=True)
@@ -240,6 +281,7 @@ def main():
         raise SystemExit('Only one worker is supported for this local database')
     signal.signal(signal.SIGTERM, stop_worker)
     signal.signal(signal.SIGINT, stop_worker)
+    threading.Thread(target=probe_loop, name='model-probe', daemon=True).start()
     # Recover interrupted jobs after a worker/container restart, never run them silently again.
     with database() as conn:
         interrupted = [dict(row) for row in conn.execute("SELECT * FROM jobs WHERE status IN ('running','cancel_requested')")]

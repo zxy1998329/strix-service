@@ -7,6 +7,7 @@ import unittest
 import service
 import portal
 import runtime_config
+import model_failover
 import worker
 import test_service as base_tests
 
@@ -313,6 +314,76 @@ class PortalTests(unittest.TestCase):
                 self.assertEqual(request.get_header('Authorization' if protocol=='openai' else 'X-api-key'),
                                  'Bearer dummy-key' if protocol=='openai' else 'dummy-key')
                 self.assertEqual(json.loads(request.data)['model'],'test-model')
+
+    def test_backup_config_masks_both_keys_and_rejects_protocol_mismatch(self):
+        headers = self.login()
+        payload = {'api_type': 'openai', 'api_base': 'https://primary.example/v1', 'model': 'primary-model',
+                   'api_key': 'primary-hidden-secret', 'backup_enabled': True,
+                   'backup_api_type': 'openai', 'backup_api_base': 'https://backup.example/v1',
+                   'backup_model': 'backup-model', 'backup_api_key': 'backup-hidden-secret'}
+        response = self.client.put('/web/admin/config', headers=headers, json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        public = response.json()
+        self.assertTrue(public['api_key_present'])
+        self.assertTrue(public['backup_api_key_present'])
+        self.assertEqual(public['backup_api_key_masked'], 'back••••••••cret')
+        self.assertNotIn('primary-hidden-secret', json.dumps(public))
+        self.assertNotIn('backup-hidden-secret', json.dumps(public))
+        self.assertEqual(public['backup_model'], 'backup-model')
+        payload.update(backup_api_type='anthropic', backup_model='claude-model')
+        self.assertEqual(self.client.put('/web/admin/config', headers=headers, json=payload).status_code, 400)
+
+    def test_backup_key_reference_retention_and_explicit_clear(self):
+        headers = self.login()
+        payload = {'api_type': 'openai', 'api_base': 'https://primary.example/v1', 'model': 'primary-model',
+                   'api_key': 'primary-secret', 'backup_enabled': True, 'backup_api_type': 'openai',
+                   'backup_api_base': 'https://backup.example/v1', 'backup_model': 'backup-model',
+                   'backup_api_key': 'backup-secret'}
+        public = self.client.put('/web/admin/config', headers=headers, json=payload).json()
+        payload.update(api_key='', api_key_reference=public['revision'], backup_api_key='',
+                       backup_api_key_reference=public['revision'])
+        public = self.client.put('/web/admin/config', headers=headers, json=payload).json()
+        self.assertTrue(public['backup_api_key_present'])
+        payload.pop('backup_api_key_reference')
+        payload['api_key_reference'] = public['revision']
+        public = self.client.put('/web/admin/config', headers=headers, json=payload).json()
+        self.assertFalse(public['backup_api_key_present'])
+
+    def test_backup_probe_uses_saved_backup_key(self):
+        headers = self.login()
+        payload = {'api_type': 'openai', 'api_base': 'https://primary.example/v1', 'model': 'primary-model',
+                   'api_key': 'primary-secret', 'backup_enabled': True, 'backup_api_type': 'openai',
+                   'backup_api_base': 'https://backup.example/v1', 'backup_model': 'backup-model',
+                   'backup_api_key': 'backup-secret'}
+        public = self.client.put('/web/admin/config', headers=headers, json=payload).json()
+        probe = {'role': 'backup', 'backup_api_type': 'openai', 'backup_api_base': 'https://backup.example/v1',
+                 'backup_model': 'backup-model', 'backup_api_key': '',
+                 'backup_api_key_reference': public['revision'], 'question': '测试问题'}
+        with patch('portal.probe_model', return_value={'ok': True}) as called:
+            response = self.client.post('/web/admin/test-model', headers=headers, json=probe)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['role'], 'backup')
+        config = called.call_args.args[0]
+        self.assertEqual(config['api_key'], 'backup-secret')
+        self.assertEqual(config['model'], 'backup-model')
+        self.assertEqual(config['api_base'], 'https://backup.example/v1')
+
+    def test_model_health_reports_backup_and_config_save_resets_breaker(self):
+        headers = self.login()
+        payload = {'api_type': 'openai', 'api_base': 'https://primary.example/v1', 'model': 'primary-model',
+                   'api_key': 'primary-secret', 'backup_enabled': True, 'backup_api_type': 'openai',
+                   'backup_api_base': 'https://backup.example/v1', 'backup_model': 'backup-model',
+                   'backup_api_key': 'backup-secret'}
+        public = self.client.put('/web/admin/config', headers=headers, json=payload).json()
+        model_failover.mark_primary_failure(service.DATA, public['revision'], 'HTTP 500')
+        health = self.client.get('/web/admin/model-health').json()
+        self.assertEqual(health['active'], 'backup')
+        self.assertEqual(health['active_model'], 'backup-model')
+        self.assertTrue(health['next_probe_at'])
+        self.client.put('/web/admin/config', headers=headers, json=payload)
+        health = self.client.get('/web/admin/model-health').json()
+        self.assertEqual(health['active'], 'primary')
+        self.assertEqual(health['active_model'], 'primary-model')
 
 
 

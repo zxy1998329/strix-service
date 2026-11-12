@@ -148,8 +148,12 @@ def _model_payload(request):
     return body
 
 
-def install_httpx(root):
-    """Instrument SDK clients inside the Strix process; requests go directly upstream."""
+def install_httpx(root, router=None):
+    """Instrument SDK clients inside the Strix process.
+
+    Without a router requests go directly upstream as before.  With a router a
+    failed primary request is retried once against the configured backup model.
+    """
     import httpx
     metrics = Metrics(root)
     from call_details import CallDetails
@@ -157,20 +161,45 @@ def install_httpx(root):
     original_async = httpx.AsyncClient.send
     original_sync = httpx.Client.send
 
+    def record_failure(target, status, value, error=None):
+        if router is None or not target or target.get('role') != 'primary' or not router.backup:
+            return None
+        reason = None
+        if error is not None:
+            from model_failover import failure_reason
+            reason = failure_reason(None, None, error)
+        else:
+            from model_failover import failure_reason
+            reason = failure_reason(status, value)
+        if reason:
+            router.note_failure(reason)
+        return reason
+
     async def send_async(client, request, *args, **kwargs):
         if _model_payload(request) is None:
             return await original_async(client, request, *args, **kwargs)
         while True:
+            target = None
+            outbound = request
+            if router is not None:
+                target = router.active()
+                if target and target.get('role') == 'backup':
+                    try:
+                        outbound = router.rewrite(request, target)
+                    except Exception as rewrite_error:
+                        print(f'[模型调用] 备用模型请求改写失败（{type(rewrite_error).__name__}）。', flush=True)
+                        outbound = request
             ticket = metrics.start()
-            value, status = None, None
+            value, status, response = None, None, None
             detail_handle = None
             error_name = None
+            failure = None
             try:
                 try:
-                    detail_handle = details.start(ticket, request)
+                    detail_handle = details.start(ticket, outbound)
                 except Exception as detail_error:
                     print(f'[模型调用] 明细记录失败（{type(detail_error).__name__}）。', flush=True)
-                response = await original_async(client, request, *args, **kwargs)
+                response = await original_async(client, outbound, *args, **kwargs)
                 status = response.status_code
                 await response.aread()
                 try:
@@ -178,9 +207,14 @@ def install_httpx(root):
                 except ValueError:
                     value = {'raw_text':response.text}
                 limited = rate_code(status, value)
-            except BaseException as error:
-                error_name = type(error).__name__
+                failure = record_failure(target, status, value)
+            except asyncio.CancelledError:
                 raise
+            except Exception as error:
+                error_name = type(error).__name__
+                failure = record_failure(target, None, None, error)
+                if failure is None:
+                    raise
             finally:
                 if detail_handle is not None:
                     try:
@@ -191,6 +225,10 @@ def install_httpx(root):
                     metrics.finish(ticket, value, status)
                 except Exception as metrics_error:
                     print(f'[模型调用] 警告：调用统计写入失败（{type(metrics_error).__name__}）。', flush=True)
+            if failure is not None:
+                if response is not None:
+                    await response.aclose()
+                continue
             if not limited:
                 return response
             await response.aclose()
@@ -201,16 +239,27 @@ def install_httpx(root):
         if _model_payload(request) is None:
             return original_sync(client, request, *args, **kwargs)
         while True:
+            target = None
+            outbound = request
+            if router is not None:
+                target = router.active()
+                if target and target.get('role') == 'backup':
+                    try:
+                        outbound = router.rewrite(request, target)
+                    except Exception as rewrite_error:
+                        print(f'[模型调用] 备用模型请求改写失败（{type(rewrite_error).__name__}）。', flush=True)
+                        outbound = request
             ticket = metrics.start()
-            value, status = None, None
+            value, status, response = None, None, None
             detail_handle = None
             error_name = None
+            failure = None
             try:
                 try:
-                    detail_handle = details.start(ticket, request)
+                    detail_handle = details.start(ticket, outbound)
                 except Exception as detail_error:
                     print(f'[模型调用] 明细记录失败（{type(detail_error).__name__}）。', flush=True)
-                response = original_sync(client, request, *args, **kwargs)
+                response = original_sync(client, outbound, *args, **kwargs)
                 status = response.status_code
                 response.read()
                 try:
@@ -218,9 +267,12 @@ def install_httpx(root):
                 except ValueError:
                     value = {'raw_text':response.text}
                 limited = rate_code(status, value)
-            except BaseException as error:
+                failure = record_failure(target, status, value)
+            except Exception as error:
                 error_name = type(error).__name__
-                raise
+                failure = record_failure(target, None, None, error)
+                if failure is None:
+                    raise
             finally:
                 if detail_handle is not None:
                     try:
@@ -231,6 +283,10 @@ def install_httpx(root):
                     metrics.finish(ticket, value, status)
                 except Exception as metrics_error:
                     print(f'[模型调用] 警告：调用统计写入失败（{type(metrics_error).__name__}）。', flush=True)
+            if failure is not None:
+                if response is not None:
+                    response.close()
+                continue
             if not limited:
                 return response
             response.close()
