@@ -20,7 +20,7 @@ import runtime_config
 
 PROBE_INTERVAL = 60
 PROBE_TIMEOUT = 10
-FAILURE_STATUSES = {401, 403, 404, 408, 429}
+FAILURE_STATUSES = {401, 403, 404, 408, 429, 432, 433}
 
 
 def state_path(data_dir):
@@ -144,6 +144,13 @@ def failure_reason(status, value=None, error=None):
         return type(error).__name__
     if status in FAILURE_STATUSES or (isinstance(status, int) and 500 <= status <= 599):
         return 'HTTP ' + str(status)
+    if isinstance(value, dict):
+        candidates = [value.get('code')]
+        if isinstance(value.get('error'), dict):
+            candidates.append(value['error'].get('code'))
+        for candidate in candidates:
+            if str(candidate) in ('429', '432', '433'):
+                return 'HTTP ' + str(candidate)
     return None
 
 

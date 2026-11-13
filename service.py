@@ -22,6 +22,8 @@ from starlette.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+import model_guard
+
 
 DATA = Path(os.environ.get('STRIX_DATA_DIR', '/srv/strix-data'))
 UPLOAD_LIMIT = int(os.environ.get('UPLOAD_MAX_BYTES', 50 * 1024 * 1024))
@@ -115,6 +117,39 @@ def update_job(job_id, status, detail):
                      (status, json.dumps(detail, ensure_ascii=False), time.time(), job_id))
 
 
+def mark_job_paused(job_id, pause):
+    """Persist the worker-visible paused state without discarding existing detail."""
+    with database() as conn:
+        row = conn.execute('SELECT detail FROM jobs WHERE id=?', (job_id,)).fetchone()
+        if row is None:
+            return
+        try:
+            detail = json.loads(row['detail'])
+        except (TypeError, ValueError):
+            detail = {}
+        detail.update({'pause_reason': pause.get('reason'), 'pause_count': pause.get('count'),
+                       'pause_threshold': pause.get('threshold'), 'paused_at': pause.get('paused_at')})
+        conn.execute("UPDATE jobs SET status='paused',detail=?,updated=? WHERE id=? AND status='running'",
+                     (json.dumps(detail, ensure_ascii=False), time.time(), job_id))
+
+
+def resume_job(job_id, owner):
+    """Lift a model-failure pause and make the job claimable by its worker again."""
+    row = owned_job(job_id, owner)
+    if row['status'] != 'paused':
+        raise HTTPException(409, '当前任务不在暂停状态')
+    root = job_dir(job_id)
+    model_guard.resume(root)
+    with database() as conn:
+        detail = json.loads(row['detail'])
+        for key in ('pause_reason', 'pause_count', 'pause_threshold', 'paused_at'):
+            detail.pop(key, None)
+        detail['resumed_at'] = time.time()
+        conn.execute("UPDATE jobs SET status='running',detail=?,updated=? WHERE id=?",
+                     (json.dumps(detail, ensure_ascii=False), time.time(), job_id))
+    return {'id': job_id, 'status': 'running'}
+
+
 def enqueue(job_id, owner, kind, name, target, instructions=''):
     import runtime_config
     if instructions:
@@ -122,8 +157,8 @@ def enqueue(job_id, owner, kind, name, target, instructions=''):
     config = runtime_config.snapshot(job_dir(job_id))
     with database() as conn:
         conn.execute('BEGIN IMMEDIATE')
-        active = conn.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running','cancel_requested')").fetchone()[0]
-        personal = conn.execute("SELECT COUNT(*) FROM jobs WHERE owner=? AND status IN ('queued','running','cancel_requested')", (owner,)).fetchone()[0]
+        active = conn.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running','cancel_requested','paused')").fetchone()[0]
+        personal = conn.execute("SELECT COUNT(*) FROM jobs WHERE owner=? AND status IN ('queued','running','cancel_requested','paused')", (owner,)).fetchone()[0]
         if active >= int(os.environ.get('QUEUE_LIMIT', '20')) or personal >= 3:
             raise HTTPException(429, 'Queue limit reached')
         now = time.time()
@@ -386,12 +421,13 @@ def execution_progress(run, row):
     active = row['status'] in ('running', 'cancel_requested')
     silence = max(0, int(now-last_recorded)) if last_recorded else None
     headline = {'queued':'等待扫描进程领取任务', 'running':'引擎运行中，等待首条执行记录',
-                'cancel_requested':'已请求停止，等待引擎退出', 'completed':'扫描执行结束，报告待人工复核',
+                'cancel_requested':'已请求停止，等待引擎退出', 'paused':'模型连续失败，任务已暂停',
+                'completed':'扫描执行结束，报告待人工复核',
                 'failed':'扫描失败，请查看结束说明', 'timed_out':'已达到任务时限', 'cancelled':'任务已停止'}.get(row['status'], row['status'])
     if active and events and row['status'] != 'cancel_requested':
         last = events[-1]
         headline = ('最近记录的工具：' + str(last['name'])) if last['kind']=='tool' else '最近一次模型请求已返回；等待后续执行记录'
-    end_time = now if row['status'] in ('queued','running','cancel_requested') else row['updated']
+    end_time = now if row['status'] in ('queued','running','cancel_requested','paused') else row['updated']
     return {'headline':headline, 'elapsed_seconds':max(0,int(end_time-row['created'])),
             'tool_calls_count':len(tools), 'coverage_count':len(entries),
             'checklist_percent': round(100 * sum(e.get('outcome') in ('reported', 'no_issue_found', 'ruled_out', 'not_applicable') for e in entries) / len(entries)) if entries else 0,
@@ -452,6 +488,7 @@ def status(job_id: str, owner: str = Depends(authenticate)):
             row['findings'] = [item for item in saved['findings'] if isinstance(item, dict)]
     row['findings_count'] = len(row['findings'])
     row['execution'] = execution_progress(run, row)
+    row['pause'] = model_guard.snapshot(job_dir(job_id))
     row['model_route'] = read_json(job_dir(job_id) / 'model_route.json', {})
     row['model_metrics'] = model_metrics(job_dir(job_id), run)
     row['report_url'] = f'/v1/scans/{job_id}/report' if row['report_ready'] else None
@@ -497,7 +534,7 @@ def model_call_list(job_id: str, page: int = 1, owner: str = Depends(authenticat
     items = []
     for path in paths[(page-1)*20:page*20]:
         value = safe_model_record(job_id, path)
-        items.append({key:value.get(key) for key in ('id','model','started','finished','status','state')})
+        items.append({key:value.get(key) for key in ('id','model','model_role','started','finished','status','state')})
     return JSONResponse({'items':items,'page':page,'total':len(paths)},headers={'Cache-Control':'no-store'})
 
 
@@ -568,8 +605,13 @@ def report(job_id: str, format: str = 'markdown', owner: str = Depends(authentic
 def cancel(job_id: str, owner: str = Depends(authenticate)):
     owned_job(job_id, owner)
     with database() as conn:
-        conn.execute("UPDATE jobs SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE 'cancel_requested' END,updated=? WHERE id=? AND status IN ('queued','running')", (time.time(), job_id))
+        conn.execute("UPDATE jobs SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE 'cancel_requested' END,updated=? WHERE id=? AND status IN ('queued','running','paused')", (time.time(), job_id))
     return {'id': job_id, 'status': owned_job(job_id, owner)['status']}
+
+
+@app.post('/v1/scans/{job_id}/resume', status_code=202)
+def resume(job_id: str, owner: str = Depends(authenticate)):
+    return resume_job(job_id, owner)
 
 
 from portal import install as install_portal

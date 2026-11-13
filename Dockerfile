@@ -11,7 +11,7 @@ ENV LITELLM_LOCAL_MODEL_COST_MAP=True TIKTOKEN_CACHE_DIR=/opt/tokenizer-cache UV
 RUN cd /opt/strix-engine && uv sync --frozen --no-dev --python /usr/local/bin/python3
 # Cache the engine's existing tokenizer data for offline context management.
 RUN /opt/strix-engine/.venv/bin/python -c "import tiktoken; tiktoken.get_encoding('cl100k_base'); tiktoken.get_encoding('o200k_base')" && uv cache clean
-COPY task_submission.py task_reuse.py greybox.py service.py worker.py portal.py runtime_config.py launcher.py entrypoint.sh model_calls.py call_details.py engine_bootstrap.py model_failover.py ./
+COPY task_submission.py task_reuse.py greybox.py service.py worker.py portal.py runtime_config.py launcher.py entrypoint.sh model_calls.py call_details.py engine_bootstrap.py model_failover.py model_guard.py ./
 COPY static ./static
 COPY strix-launcher.sh /usr/local/bin/strix
 COPY STRIX-LICENSE /usr/share/licenses/strix/LICENSE

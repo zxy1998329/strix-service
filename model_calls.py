@@ -148,32 +148,52 @@ def _model_payload(request):
     return body
 
 
-def install_httpx(root, router=None):
+def install_httpx(root, router=None, guard=None):
     """Instrument SDK clients inside the Strix process.
 
     Without a router requests go directly upstream as before.  With a router a
     failed primary request is retried once against the configured backup model.
+    With a guard, consecutive failure streaks are counted, the job is paused at
+    the configured threshold, and the call blocks until the API resumes it.
     """
     import httpx
+    from model_failover import failure_reason
     metrics = Metrics(root)
-    from call_details import CallDetails
+    from call_details import CallDetails, sanitize
     details = CallDetails(root)
     original_async = httpx.AsyncClient.send
     original_sync = httpx.Client.send
 
-    def record_failure(target, status, value, error=None):
-        if router is None or not target or target.get('role') != 'primary' or not router.backup:
-            return None
-        reason = None
+    def model_name(request, target):
+        if target and target.get('model_name'):
+            return target['model_name']
+        body = _model_payload(request) or {}
+        return str(body.get('model') or '')
+
+    def failure_message(value, error, status):
         if error is not None:
-            from model_failover import failure_reason
-            reason = failure_reason(None, None, error)
+            text = f'{type(error).__name__}: {error}'
+        elif isinstance(value, dict):
+            error_value = value.get('error')
+            if isinstance(error_value, dict):
+                text = error_value.get('message') or error_value.get('code') or error_value.get('type') or ''
+            elif isinstance(error_value, str):
+                text = error_value
+            else:
+                text = ''
+            if not text:
+                text = value.get('message') or value.get('detail') or value.get('raw_text') or ''
+            if not text and status:
+                text = 'HTTP ' + str(status)
         else:
-            from model_failover import failure_reason
-            reason = failure_reason(status, value)
-        if reason:
-            router.note_failure(reason)
-        return reason
+            text = 'HTTP ' + str(status) if status else ''
+        return sanitize(str(text), details.secrets)[:800]
+
+    def note_attempt(ticket, target, outbound, status, error_name, value, error, started):
+        if guard is None:
+            return
+        guard.note_attempt(ticket, (target or {}).get('role', 'primary'), model_name(outbound, target),
+                           status, error_name, failure_message(value, error, status), started, time.time())
 
     async def send_async(client, request, *args, **kwargs):
         if _model_payload(request) is None:
@@ -189,14 +209,16 @@ def install_httpx(root, router=None):
                     except Exception as rewrite_error:
                         print(f'[模型调用] 备用模型请求改写失败（{type(rewrite_error).__name__}）。', flush=True)
                         outbound = request
+            started = time.time()
             ticket = metrics.start()
             value, status, response = None, None, None
             detail_handle = None
             error_name = None
+            error_object = None
             failure = None
             try:
                 try:
-                    detail_handle = details.start(ticket, outbound)
+                    detail_handle = details.start(ticket, outbound, (target or {}).get('role'))
                 except Exception as detail_error:
                     print(f'[模型调用] 明细记录失败（{type(detail_error).__name__}）。', flush=True)
                 response = await original_async(client, outbound, *args, **kwargs)
@@ -205,16 +227,14 @@ def install_httpx(root, router=None):
                 try:
                     value = response.json()
                 except ValueError:
-                    value = {'raw_text':response.text}
-                limited = rate_code(status, value)
-                failure = record_failure(target, status, value)
+                    value = {'raw_text': response.text}
+                failure = failure_reason(status, value)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                error_object = error
                 error_name = type(error).__name__
-                failure = record_failure(target, None, None, error)
-                if failure is None:
-                    raise
+                failure = failure_reason(None, None, error)
             finally:
                 if detail_handle is not None:
                     try:
@@ -225,15 +245,43 @@ def install_httpx(root, router=None):
                     metrics.finish(ticket, value, status)
                 except Exception as metrics_error:
                     print(f'[模型调用] 警告：调用统计写入失败（{type(metrics_error).__name__}）。', flush=True)
-            if failure is not None:
+            if failure is None:
+                if guard is not None:
+                    guard.note_success()
+                return response
+
+            # The attempt failed.  Record it for the pause page, then decide.
+            note_attempt(ticket, target, outbound, status, error_name, value, error_object, started)
+            role = (target or {}).get('role', 'primary')
+            if role == 'primary' and router is not None and router.backup:
+                router.note_failure(failure)
                 if response is not None:
                     await response.aclose()
                 continue
-            if not limited:
+
+            if guard is not None:
+                count = guard.note_logical_failure(failure)
+                if count >= guard.threshold:
+                    guard.pause(f'主备模型均不可用，连续 {count} 次失败：{failure}')
+                    guard.wait()
+                    continue
+                if response is not None:
+                    await response.aclose()
+                print(f'[模型调用] 连续失败 {count}/{guard.threshold} 次，等待 60 秒后重试。', flush=True)
+                await asyncio.sleep(WAIT_SECONDS)
+                continue
+
+            # Legacy behavior without a pause guard: keep the original failover
+            # and rate-limit retry semantics.
+            if response is not None and rate_code(status, value):
+                await response.aclose()
+                print(f'[模型调用] 模型返回限流 {rate_code(status, value)}，等待 60 秒后重试。', flush=True)
+                await asyncio.sleep(WAIT_SECONDS)
+                continue
+            if response is not None:
                 return response
-            await response.aclose()
-            print(f'[模型调用] 模型返回限流 {limited}，等待 60 秒后重试。', flush=True)
-            await asyncio.sleep(WAIT_SECONDS)
+            if error_object is not None:
+                raise error_object
 
     def send_sync(client, request, *args, **kwargs):
         if _model_payload(request) is None:
@@ -249,14 +297,16 @@ def install_httpx(root, router=None):
                     except Exception as rewrite_error:
                         print(f'[模型调用] 备用模型请求改写失败（{type(rewrite_error).__name__}）。', flush=True)
                         outbound = request
+            started = time.time()
             ticket = metrics.start()
             value, status, response = None, None, None
             detail_handle = None
             error_name = None
+            error_object = None
             failure = None
             try:
                 try:
-                    detail_handle = details.start(ticket, outbound)
+                    detail_handle = details.start(ticket, outbound, (target or {}).get('role'))
                 except Exception as detail_error:
                     print(f'[模型调用] 明细记录失败（{type(detail_error).__name__}）。', flush=True)
                 response = original_sync(client, outbound, *args, **kwargs)
@@ -265,14 +315,12 @@ def install_httpx(root, router=None):
                 try:
                     value = response.json()
                 except ValueError:
-                    value = {'raw_text':response.text}
-                limited = rate_code(status, value)
-                failure = record_failure(target, status, value)
+                    value = {'raw_text': response.text}
+                failure = failure_reason(status, value)
             except Exception as error:
+                error_object = error
                 error_name = type(error).__name__
-                failure = record_failure(target, None, None, error)
-                if failure is None:
-                    raise
+                failure = failure_reason(None, None, error)
             finally:
                 if detail_handle is not None:
                     try:
@@ -283,15 +331,40 @@ def install_httpx(root, router=None):
                     metrics.finish(ticket, value, status)
                 except Exception as metrics_error:
                     print(f'[模型调用] 警告：调用统计写入失败（{type(metrics_error).__name__}）。', flush=True)
-            if failure is not None:
+            if failure is None:
+                if guard is not None:
+                    guard.note_success()
+                return response
+
+            note_attempt(ticket, target, outbound, status, error_name, value, error_object, started)
+            role = (target or {}).get('role', 'primary')
+            if role == 'primary' and router is not None and router.backup:
+                router.note_failure(failure)
                 if response is not None:
                     response.close()
                 continue
-            if not limited:
+
+            if guard is not None:
+                count = guard.note_logical_failure(failure)
+                if count >= guard.threshold:
+                    guard.pause(f'主备模型均不可用，连续 {count} 次失败：{failure}')
+                    guard.wait()
+                    continue
+                if response is not None:
+                    response.close()
+                print(f'[模型调用] 连续失败 {count}/{guard.threshold} 次，等待 60 秒后重试。', flush=True)
+                time.sleep(WAIT_SECONDS)
+                continue
+
+            if response is not None and rate_code(status, value):
+                response.close()
+                print(f'[模型调用] 模型返回限流 {rate_code(status, value)}，等待 60 秒后重试。', flush=True)
+                time.sleep(WAIT_SECONDS)
+                continue
+            if response is not None:
                 return response
-            response.close()
-            print(f'[模型调用] 模型返回限流 {limited}，等待 60 秒后重试。', flush=True)
-            time.sleep(WAIT_SECONDS)
+            if error_object is not None:
+                raise error_object
 
     httpx.AsyncClient.send = send_async
     httpx.Client.send = send_sync

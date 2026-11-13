@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import model_failover
+import model_guard
 
 
 def targets(revision='rev-1'):
@@ -188,6 +189,171 @@ class FailoverHttpxTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(seen), 1)
         self.assertEqual(str(seen[0].url), 'https://backup.example/v1/chat/completions')
+
+
+class GuardTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_pause_after_threshold_and_resume_clears_streak(self):
+        guard = model_guard.Guard(self.root, 3)
+        guard.note_attempt('call-1', 'primary', 'primary-model', 429, None, 'rate limited', 10, 11)
+        guard.note_logical_failure('HTTP 429')
+        guard.note_attempt('call-2', 'backup', 'backup-model', 429, None, 'rate limited', 12, 13)
+        self.assertEqual(guard.note_logical_failure('HTTP 429'), 2)
+        self.assertFalse(model_guard.read(self.root)['paused'])
+        self.assertEqual(guard.note_logical_failure('HTTP 429'), 3)
+        guard.pause('主备模型连续 3 次失败：HTTP 429')
+        state = model_guard.read(self.root)
+        self.assertTrue(state['paused'])
+        self.assertEqual(state['count'], 3)
+        self.assertEqual(state['failures'][0]['role'], 'primary')
+        self.assertEqual(state['failures'][1]['role'], 'backup')
+        self.assertNotIn('secret', json.dumps(state))
+        resumed = model_guard.resume(self.root)
+        self.assertFalse(resumed['paused'])
+        self.assertEqual(resumed['count'], 0)
+        self.assertEqual(resumed['failures'], [])
+        self.assertEqual(resumed['resume_epoch'], 1)
+
+    def test_success_clears_streak_but_does_not_unpause(self):
+        guard = model_guard.Guard(self.root, 2)
+        guard.note_attempt('call-1', 'backup', 'backup-model', 500, None, 'server error', 10, 11)
+        guard.note_logical_failure('HTTP 500')
+        guard.pause('paused')
+        guard.note_success()
+        state = model_guard.read(self.root)
+        self.assertTrue(state['paused'])
+        self.assertEqual(state['count'], 0)
+        self.assertEqual(state['failures'], [])
+
+
+class PauseHookTests(unittest.TestCase):
+    def setUp(self):
+        import httpx
+        self.httpx = httpx
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.config = targets()
+        model_failover.reset_state(self.root, 'rev-1')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_primary_and_backup_failures_pause_after_threshold(self):
+        import model_calls
+
+        class FakeGuard:
+            threshold = 2
+
+            def __init__(self):
+                self.attempts = []
+                self.count = 0
+                self.paused = False
+                self.waited = False
+
+            def note_attempt(self, *args):
+                self.attempts.append(args)
+
+            def note_logical_failure(self, reason):
+                self.count += 1
+                return self.count
+
+            def note_success(self):
+                self.count = 0
+
+            def pause(self, reason):
+                self.paused = True
+
+            def wait(self):
+                self.waited = True
+
+        guard = FakeGuard()
+        replies = 0
+
+        def handler(request):
+            nonlocal replies
+            if str(request.url).startswith('https://primary.example'):
+                return self.httpx.Response(500, json={'error': {'message': 'primary down'}})
+            replies += 1
+            if replies <= 2:
+                return self.httpx.Response(500, json={'error': {'message': 'backup down'}})
+            return self.httpx.Response(200, json={'choices': [{'message': {'content': 'ok'}}]})
+
+        original_sync = self.httpx.Client.send
+        original_async = self.httpx.AsyncClient.send
+        router = model_failover.Router(self.config, self.root, self.root / 'route.json')
+        with patch.object(self.httpx.Client, 'send', original_sync), \
+                patch.object(self.httpx.AsyncClient, 'send', original_async), \
+                patch('model_calls.time.sleep'):
+            model_calls.install_httpx(self.root, router, guard)
+            with self.httpx.Client(transport=self.httpx.MockTransport(handler)) as client:
+                response = client.post('https://primary.example/v1/chat/completions',
+                                       json={'model': 'primary-model', 'messages': [{'role': 'user', 'content': 'hi'}]})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(guard.paused)
+        self.assertTrue(guard.waited)
+        self.assertEqual(guard.count, 0)  # success after resume resets the streak
+        roles = [item[1] for item in guard.attempts]
+        self.assertEqual(roles.count('primary'), 1)
+        self.assertEqual(roles.count('backup'), 2)
+
+
+    def test_without_backup_pauses_after_primary_streak(self):
+        import model_calls
+        config = targets()
+        config['backup'] = None
+
+        class FakeGuard:
+            threshold = 2
+
+            def __init__(self):
+                self.count = 0
+                self.paused = False
+
+            def note_attempt(self, *args):
+                pass
+
+            def note_logical_failure(self, reason):
+                self.count += 1
+                return self.count
+
+            def note_success(self):
+                self.count = 0
+
+            def pause(self, reason):
+                self.paused = True
+
+            def wait(self):
+                pass
+
+        guard = FakeGuard()
+        replies = 0
+
+        def handler(request):
+            nonlocal replies
+            replies += 1
+            if replies <= 2:
+                return self.httpx.Response(500, json={'error': {'message': 'down'}})
+            return self.httpx.Response(200, json={'choices': [{'message': {'content': 'ok'}}]})
+
+        original_sync = self.httpx.Client.send
+        original_async = self.httpx.AsyncClient.send
+        router = model_failover.Router(config, self.root, self.root / 'route.json')
+        with patch.object(self.httpx.Client, 'send', original_sync), \
+                patch.object(self.httpx.AsyncClient, 'send', original_async), \
+                patch('model_calls.time.sleep'):
+            model_calls.install_httpx(self.root, router, guard)
+            with self.httpx.Client(transport=self.httpx.MockTransport(handler)) as client:
+                response = client.post('https://primary.example/v1/chat/completions',
+                                       json={'model': 'primary-model', 'messages': [{'role': 'user', 'content': 'hi'}]})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(guard.paused)
+        self.assertEqual(replies, 3)
 
 
 class ProbeTests(unittest.TestCase):

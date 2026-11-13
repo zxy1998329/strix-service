@@ -55,7 +55,7 @@ class CallDetails:
             os.chmod(temporary,0o600)
             stream.write(data)
         os.replace(temporary,path)
-        summary = {key:safe.get(key) for key in ('id','model','started','finished','status','state')}
+        summary = {key:safe.get(key) for key in ('id','model','model_role','started','finished','status','state')}
         index = path.with_suffix('.meta')
         temporary_index = index.with_suffix('.'+uuid.uuid4().hex+'.tmp')
         with temporary_index.open('x',encoding='utf-8') as stream:
@@ -63,7 +63,7 @@ class CallDetails:
             json.dump(summary,stream,ensure_ascii=False)
         os.replace(temporary_index,index)
 
-    def start(self, identifier, request):
+    def start(self, identifier, request, role=None):
         parsed = urlsplit(str(request.url))
         url = urlunsplit((parsed.scheme, parsed.netloc.rsplit('@',1)[-1], parsed.path, '', ''))
         for name,value in request.headers.items():
@@ -71,7 +71,7 @@ class CallDetails:
                 self.secrets.append(value)
                 if value.lower().startswith('bearer '):self.secrets.append(value[7:])
         record = {'id':identifier,'started':time.time(),'finished':None,'status':None,
-                  'url':url,'model':json.loads(request.content).get('model'),
+                  'url':url,'model':json.loads(request.content).get('model'),'model_role':role,
                   'request':json.loads(request.content),'response':None,'state':'running'}
         filename = f'{time.time_ns():020d}-{identifier}.json'
         path = self.root / filename

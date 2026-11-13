@@ -373,14 +373,17 @@ class PortalTests(unittest.TestCase):
         payload = {'api_type': 'openai', 'api_base': 'https://primary.example/v1', 'model': 'primary-model',
                    'api_key': 'primary-secret', 'backup_enabled': True, 'backup_api_type': 'openai',
                    'backup_api_base': 'https://backup.example/v1', 'backup_model': 'backup-model',
-                   'backup_api_key': 'backup-secret'}
+                   'backup_api_key': 'backup-secret', 'pause_after_failures': 5}
         public = self.client.put('/web/admin/config', headers=headers, json=payload).json()
+        self.assertEqual(public['pause_after_failures'], 5)
+        payload['pause_after_failures'] = 21
+        self.assertEqual(self.client.put('/web/admin/config', headers=headers, json=payload).status_code, 400)
         model_failover.mark_primary_failure(service.DATA, public['revision'], 'HTTP 500')
         health = self.client.get('/web/admin/model-health').json()
         self.assertEqual(health['active'], 'backup')
         self.assertEqual(health['active_model'], 'backup-model')
         self.assertTrue(health['next_probe_at'])
-        self.client.put('/web/admin/config', headers=headers, json=payload)
+        self.client.put('/web/admin/config', headers=headers, json={**payload, 'pause_after_failures': 5})
         health = self.client.get('/web/admin/model-health').json()
         self.assertEqual(health['active'], 'primary')
         self.assertEqual(health['active_model'], 'primary-model')

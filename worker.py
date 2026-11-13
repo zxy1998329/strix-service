@@ -10,9 +10,10 @@ from pathlib import Path
 
 import docker
 import model_failover
+import model_guard
 import runtime_config
 
-from service import DATA, database, job_dir, latest_run, read_json, update_job, validate_target
+from service import DATA, database, job_dir, latest_run, mark_job_paused, read_json, update_job, validate_target
 
 STOP = False
 
@@ -114,10 +115,11 @@ def child_environment(secret_dir, settings=None):
             targets = runtime_config.model_targets(settings)
         except ValueError:
             targets = None
-        if targets and targets.get('backup'):
+        if targets and (targets.get('backup') or int(settings.get('pause_after_failures', 0) or 0) > 0):
             failover_file = Path(secret_dir) / 'model-failover.json'
             failover_file.write_text(json.dumps({'revision': targets['revision'], 'state_dir': str(DATA),
-                                                 'primary': targets['primary'], 'backup': targets['backup']}),
+                                                 'primary': targets['primary'], 'backup': targets['backup'],
+                                                 'pause_after_failures': int(settings.get('pause_after_failures', 0) or 0)}),
                                      encoding='utf-8')
             failover_file.chmod(0o600)
             env['STRIX_MODEL_FAILOVER_FILE'] = str(failover_file)
@@ -209,10 +211,25 @@ def run_job(job):
                 process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT,
                                            start_new_session=True)
                 started = time.monotonic()
+                paused_since = None
                 while process.poll() is None:
                     with database() as conn:
                         state = conn.execute('SELECT status FROM jobs WHERE id=?', (job['id'],)).fetchone()[0]
-                    if STOP or state == 'cancel_requested' or (timeout and time.monotonic() - started > timeout):
+                    pause_state = model_guard.read(root)
+                    if pause_state.get('paused') and state == 'running':
+                        try:
+                            mark_job_paused(job['id'], pause_state)
+                        except Exception as pause_error:
+                            print(f'[模型暂停] 状态写入失败（{type(pause_error).__name__}）。', flush=True)
+                        state = 'paused'
+                    now = time.monotonic()
+                    if state == 'paused':
+                        if paused_since is None:
+                            paused_since = now
+                    elif paused_since is not None:
+                        started += now - paused_since
+                        paused_since = None
+                    if STOP or state == 'cancel_requested' or (timeout and paused_since is None and now - started > timeout):
                         terminal = 'cancelled' if STOP or state == 'cancel_requested' else 'timed_out'
                         reason = 'Worker stopped or user cancelled' if terminal == 'cancelled' else 'Wall-clock time limit reached'
                         os.killpg(process.pid, signal.SIGTERM)
@@ -284,7 +301,7 @@ def main():
     threading.Thread(target=probe_loop, name='model-probe', daemon=True).start()
     # Recover interrupted jobs after a worker/container restart, never run them silently again.
     with database() as conn:
-        interrupted = [dict(row) for row in conn.execute("SELECT * FROM jobs WHERE status IN ('running','cancel_requested')")]
+        interrupted = [dict(row) for row in conn.execute("SELECT * FROM jobs WHERE status IN ('running','cancel_requested','paused')")]
     for job in interrupted:
         try:
             cleanup_sandboxes(job_dir(job['id']))

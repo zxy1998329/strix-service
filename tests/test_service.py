@@ -15,6 +15,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 import service
 import worker
+import model_guard
 
 
 class ServiceTests(unittest.TestCase):
@@ -223,6 +224,33 @@ sys.exit(2)
             self.assertTrue((service.job_dir(job_id) / 'report.json').is_file())
             if not cancel:
                 self.assertEqual(json.loads(state['detail'])['structured_findings_count'], 1)
+
+
+    def test_paused_job_is_visible_and_can_be_resumed(self):
+        response = self.submit()
+        self.assertEqual(response.status_code, 202, response.text)
+        job_id = response.json()['id']
+        root = service.job_dir(job_id)
+        guard = model_guard.default_state(3)
+        guard.update({'paused': True, 'paused_at': 100, 'count': 3,
+                      'reason': '主备模型连续 3 次失败：HTTP 429',
+                      'failures': [{'id': 'a' * 32, 'role': 'backup', 'model': 'backup-model',
+                                    'status': 429, 'error': None, 'message': 'rate limited',
+                                    'started': 90, 'finished': 91}]})
+        model_guard.write(root, guard)
+        service.update_job(job_id, 'paused', {})
+        status = self.client.get(f'/v1/scans/{job_id}', headers=self.auth)
+        self.assertEqual(status.status_code, 200, status.text)
+        body = status.json()
+        self.assertEqual(body['status'], 'paused')
+        self.assertTrue(body['pause']['paused'])
+        self.assertEqual(body['pause']['failures'][0]['status'], 429)
+        self.assertEqual(self.client.get(f'/v1/scans/{job_id}', headers={'Authorization': 'Bearer ' + 'b' * 40}).status_code, 404)
+        resume = self.client.post(f'/v1/scans/{job_id}/resume', headers=self.auth)
+        self.assertEqual(resume.status_code, 202, resume.text)
+        self.assertEqual(resume.json()['status'], 'running')
+        self.assertFalse(model_guard.read(root)['paused'])
+        self.assertEqual(self.client.post(f'/v1/scans/{job_id}/resume', headers=self.auth).status_code, 409)
 
 
 if __name__ == '__main__':

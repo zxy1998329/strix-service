@@ -50,6 +50,7 @@ def defaults():
             'backup_enabled': False, 'backup_model': '', 'backup_api_base': '',
             'backup_api_type': 'openai', 'backup_api_key': '',
             'backup_extra_headers': {}, 'backup_extra_body': {},
+            'pause_after_failures': 3,
             'scope_restrictions_enabled': False, 'enabled': False, 'allowed_hosts': os.environ.get('ALLOWED_TARGET_HOSTS', ''),
             'allowed_cidrs': os.environ.get('ALLOWED_TARGET_CIDRS', ''),
             'allowed_ports': os.environ.get('ALLOWED_TARGET_PORTS', '80,443'),
@@ -126,6 +127,9 @@ def validate_settings(value):
             raise ValueError('备用模型必须与主模型使用相同的接口格式（OpenAI 或 Anthropic）')
     if not ((int(value['timeout']) == 0 or 30 <= int(value['timeout']) <= 14400) and 0 <= int(value['max_turns']) <= 2147483647 and 0 <= float(value['budget']) <= 100):
         raise ValueError('限制设为 0 表示不限制；非零时限范围 30—14400 秒，预算最多 100 美元')
+    pause_after = value.get('pause_after_failures', 3)
+    if isinstance(pause_after, bool) or not isinstance(pause_after, int) or not 0 <= pause_after <= 20:
+        raise ValueError('连续失败暂停阈值应为 0—20 的整数；0 表示不暂停')
     if type(value.get('scope_restrictions_enabled', False)) is not bool:
         raise ValueError('扫描范围限制必须为开关值')
     if value.get('scope_restrictions_enabled', False):

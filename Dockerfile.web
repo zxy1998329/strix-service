@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
-COPY service.py portal.py runtime_config.py greybox.py task_submission.py task_reuse.py model_calls.py call_details.py model_failover.py ./
+COPY service.py portal.py runtime_config.py greybox.py task_submission.py task_reuse.py model_calls.py call_details.py model_failover.py model_guard.py ./
 COPY static ./static
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 STRIX_DATA_DIR=/srv/strix-data \

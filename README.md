@@ -16,9 +16,10 @@
 | POST | `/v1/scans/blackbox` | JSON：target、name、authorized=true |
 | GET | `/v1/scans/{id}` | 任务状态、模型响应数、Token、报告地址 |
 | GET | `/v1/scans/{id}/report` | 下载 Markdown；`?format=json` 下载 JSON |
-| POST | `/v1/scans/{id}/cancel` | 取消排队或运行任务 |
+| POST | `/v1/scans/{id}/cancel` | 取消排队、运行或暂停任务 |
+| POST | `/v1/scans/{id}/resume` | 恢复因模型连续失败而暂停的任务 |
 
-提交接口返回 HTTP 202 和任务 ID，不会等待整场扫描。状态包括 queued、running、cancel_requested、completed、failed、timed_out、cancelled。进度是阶段和计数，不提供虚假的百分比。失败/超时的已执行任务也产生明确标注不完整的报告；排队阶段取消的任务不生成检测报告。
+提交接口返回 HTTP 202 和任务 ID，不会等待整场扫描。状态包括 queued、running、paused、cancel_requested、completed、failed、timed_out、cancelled。进度是阶段和计数，不提供虚假的百分比。失败/超时的已执行任务也产生明确标注不完整的报告；排队阶段取消的任务不生成检测报告。
 
 白盒默认 ZIP 最大 50 MiB、解压总量 500 MiB、最多 10000 条目，拒绝路径穿越、特殊文件、符号链接、加密 ZIP、大小写重复路径和明显压缩炸弹。HTTP multipart 需要 Content-Length；反向代理也必须限制请求体大小。
 
@@ -31,6 +32,8 @@
 切换后每 60 秒由 Worker 后台线程向主模型发送一次 `hi` 探测，不阻塞正在执行的扫描。探测成功即切回主模型；失败则继续使用备用模型并在 60 秒后重试。配置页会显示当前使用的是主模型还是备用模型、切换原因和下次探测倒计时；任务详情显示该任务实际使用的模型。
 
 断路器状态保存在数据目录的 `model_health.json`，只含模型角色、时间和错误类别，不含 API Key。探测请求会产生少量模型费用，但不计入任务 Token 统计。未配置备用模型时，行为与旧版完全一致。
+
+当主备模型都不可用并连续失败达到“连续失败暂停阈值”（默认 3 次，可在模型配置页修改，0 表示关闭）时，任务会进入 `paused`：停止发起新的模型调用，保留 Strix 进程和沙箱，页面显示暂停原因、连续失败次数和每次主/备请求的状态、错误摘要，支持手动恢复。恢复后从当前失败请求继续，计数清零。暂停期间会占用唯一的串行 Worker，后续排队任务需等恢复或取消。Worker 重启时暂停任务会被标记失败，不能自动续跑。
 
 ## 必须了解的部署边界
 
