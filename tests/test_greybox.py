@@ -53,6 +53,9 @@ class GreyboxTests(test_service.unittest.TestCase):
             values=json.loads(result.stdout)
             self.assertEqual(values[0]['state'],'success')
             self.assertEqual(values[1]['http_status'],401)
+            base=f'http://127.0.0.1:{server.server_port}'
+            self.assertEqual(values[0]['url'],base+'/me')
+            self.assertEqual(values[1]['url'],base+'/reject')
             self.assertEqual(observed,[('Bearer synthetic',None),(None,'sid=demo')])
         finally:
             server.shutdown();server.server_close();thread.join()
@@ -94,6 +97,7 @@ class GreyboxTests(test_service.unittest.TestCase):
         try:
             result=subprocess.run([sys.executable,'-c',greybox.PROBE_SCRIPT],input=json.dumps({**normalized,'target':f'http://127.0.0.1:{server.server_port}'}),text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(json.loads(result.stdout)[0]['url'],f'http://127.0.0.1:{server.server_port}/')
             self.assertEqual(observed,[('sid=demo-session; tenant=test','Custom demo-credential')])
         finally:
             server.shutdown();server.server_close();thread.join()

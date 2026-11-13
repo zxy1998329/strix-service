@@ -97,7 +97,9 @@ for a in value['accounts']:
     cookies=[e['name']+'='+e['value'] for e in a.get('auth',[]) if e['type']=='cookie']
     if cookies: headers['Cookie']='; '.join(cookies)
    path=a['verify_path'] or (a['login_path'] if a['method']=='password' else '') or '/'
-   req=urllib.request.Request(value['target'].rstrip('/')+path,headers=headers)
+   url=value['target'].rstrip('/')+path
+   r['url']=url
+   req=urllib.request.Request(url,headers=headers)
    with urllib.request.build_opener(NoRedirect).open(req,timeout=15) as resp:
     text=resp.read(1024*1024).decode('utf-8','replace');code=resp.status
    r.update(state='success' if code==200 else 'failed',message='接口调用成功（HTTP 200）' if code==200 else '接口未返回 HTTP 200',http_status=code)

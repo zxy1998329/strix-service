@@ -59,7 +59,10 @@ function hydrateReuseForm(form){
     }
    }
    for(const [key,label] of [['login_path','登录页路径'],['verify_path','验证接口路径'],['steps','登录步骤']]){
-    if(account[key])entries.insertAdjacentHTML('beforeend',field(key,label,account[key]));
+    if(!account[key])continue;
+    const existing=box.querySelector('[name='+key+']');
+    if(existing)existing.value=account[key];
+    else entries.insertAdjacentHTML('beforeend',field(key,label,account[key]));
    }
   }
   if(!list.children.length)list.innerHTML=greyAccount(0);
