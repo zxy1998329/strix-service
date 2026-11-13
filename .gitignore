@@ -12,3 +12,4 @@ venv/
 .ruff_cache/
 *.log
 outputs/
+.idea/
